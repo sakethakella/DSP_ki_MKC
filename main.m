@@ -1,111 +1,94 @@
-% Automated Generation of the Complete 3-Filter Polyphase System
-clear modelName;
-modelName = 'Full_Polyphase_System';
+% Multirate Signal Processing System: Polyphase Filtering & Fixed-Point Conversion
+clear; clc; close all;
 
-% 1. Create and open a new blank Simulink model
-if bdIsLoaded(modelName)
-    close_system(modelName, 0);
-end
-new_system(modelName);
-open_system(modelName);
+%% 1. Generate Test Signal & Fixed-Point Input Conversion
+Fs = 1000; % Arbitrary sampling frequency
+t = 0:1/Fs:1-1/Fs; % 1 second of data
 
-%% --- BLOCK PLACEMENT ---
+% Create a composite signal with frequencies residing in all 3 target bands:
+% Band 1: 0 to 0.2*pi 
+% Band 2: 0.2*pi to 0.5*pi 
+% Band 3: 0.5*pi to 0.9*pi 
+f1 = 0.1 * (Fs/2);
+f2 = 0.35 * (Fs/2);
+f3 = 0.7 * (Fs/2);
 
-% Input & Initial 8-bit Data Type Conversion
-add_block('simulink/Sources/From Workspace', [modelName, '/Input'], ...
-    'Position', [20, 300, 80, 340], 'VariableName', 'sim_input');
-add_block('simulink/Signal Attributes/Data Type Conversion', [modelName, '/DTC_In'], ...
-    'Position', [120, 300, 180, 340], 'OutDataTypeStr', 'fixdt(1,8,6)');
+x_real = 0.3*sin(2*pi*f1*t) + 0.3*sin(2*pi*f2*t) + 0.3*sin(2*pi*f3*t);
 
-% Shared Delay Chain (z^-1)
-add_block('simulink/Discrete/Delay', [modelName, '/Delay1'], ...
-    'Position', [220, 400, 260, 440], 'DelayLength', '1');
-add_block('simulink/Discrete/Delay', [modelName, '/Delay2'], ...
-    'Position', [220, 500, 260, 540], 'DelayLength', '1');
+% Convert input to Fixed-Point: 8-bit real with 6 fractional bits (Signed)
+% Syntax: fi(data, signed_boolean, word_length, fraction_length)
+x_fi = fi(x_real, 1, 8, 6);
+x_double = double(x_fi); % Compute in double for the intermediate DSP steps
 
-% Shared Downsamplers (Factor of 3)
-add_block('dspsigops/Downsample', [modelName, '/DS0'], 'Position', [320, 300, 360, 340], 'N', '3');
-add_block('dspsigops/Downsample', [modelName, '/DS1'], 'Position', [320, 400, 360, 440], 'N', '3');
-add_block('dspsigops/Downsample', [modelName, '/DS2'], 'Position', [320, 500, 360, 540], 'N', '3');
+%% 2. Filter Design (Length > 20, Polyphase Depth = 3)
+% We choose N = 29 (Length 30) because it is > 20 and perfectly divisible 
+% by our polyphase depth of 3.
+N = 23; 
 
-% --- LPF BANK (Top Row) ---
-add_block('simulink/Discrete/Discrete FIR Filter', [modelName, '/LPF_E0'], 'Position', [450, 100, 530, 140], 'Coefficients', 'E0_lpf');
-add_block('simulink/Discrete/Discrete FIR Filter', [modelName, '/LPF_E1'], 'Position', [450, 150, 530, 190], 'Coefficients', 'E1_lpf');
-add_block('simulink/Discrete/Discrete FIR Filter', [modelName, '/LPF_E2'], 'Position', [450, 200, 530, 240], 'Coefficients', 'E2_lpf');
-add_block('simulink/Math Operations/Add', [modelName, '/Sum_LPF'], 'Position', [580, 150, 610, 200], 'Inputs', '+++');
-add_block('simulink/Math Operations/Gain', [modelName, '/Gain_LPF'], 'Position', [650, 155, 710, 195], 'Gain', '10^(1/20)'); % +1 dB
+% Design the FIR filters
+h_lpf  = fir1(N, 0.2, 'low');               % LPF: [0, 0.2*pi]
+h_bpf1 = fir1(N, [0.2 0.5], 'bandpass');    % BPF1: [0.2*pi, 0.5*pi]
+h_bpf2 = fir1(N, [0.5 0.9], 'bandpass');    % BPF2: [0.5*pi, 0.9*pi]
 
-% --- BPF1 BANK (Middle Row) ---
-add_block('simulink/Discrete/Discrete FIR Filter', [modelName, '/BPF1_E0'], 'Position', [450, 300, 530, 340], 'Coefficients', 'E0_bpf1');
-add_block('simulink/Discrete/Discrete FIR Filter', [modelName, '/BPF1_E1'], 'Position', [450, 350, 530, 390], 'Coefficients', 'E1_bpf1');
-add_block('simulink/Discrete/Discrete FIR Filter', [modelName, '/BPF1_E2'], 'Position', [450, 400, 530, 440], 'Coefficients', 'E2_bpf1');
-add_block('simulink/Math Operations/Add', [modelName, '/Sum_BPF1'], 'Position', [580, 350, 610, 400], 'Inputs', '+++');
-add_block('simulink/Math Operations/Gain', [modelName, '/Gain_BPF1'], 'Position', [650, 355, 710, 395], 'Gain', '10^(-1/20)'); % -1 dB
+%% 3. Polyphase Filter Implementation (Depth 3)
+% To downsample by 3 efficiently, we decompose the filters into 3 phases.
+% Phase 0: h(1), h(4), h(7)...
+% Phase 1: h(2), h(5), h(8)...
+% Phase 2: h(3), h(6), h(9)...
 
-% --- BPF2 BANK (Bottom Row) ---
-add_block('simulink/Discrete/Discrete FIR Filter', [modelName, '/BPF2_E0'], 'Position', [450, 500, 530, 540], 'Coefficients', 'E0_bpf2');
-add_block('simulink/Discrete/Discrete FIR Filter', [modelName, '/BPF2_E1'], 'Position', [450, 550, 530, 590], 'Coefficients', 'E1_bpf2');
-add_block('simulink/Discrete/Discrete FIR Filter', [modelName, '/BPF2_E2'], 'Position', [450, 600, 530, 640], 'Coefficients', 'E2_bpf2');
-add_block('simulink/Math Operations/Add', [modelName, '/Sum_BPF2'], 'Position', [580, 550, 610, 600], 'Inputs', '+++');
-add_block('simulink/Math Operations/Gain', [modelName, '/Gain_BPF2'], 'Position', [650, 555, 710, 595], 'Gain', '10^(-1/20)'); % -1 dB
+% Extract Polyphase Components for LPF
+E0_lpf = h_lpf(1:3:end); E1_lpf = h_lpf(2:3:end); E2_lpf = h_lpf(3:3:end);
 
-% --- FINAL COMBINER & RAM OUTPUT ---
-add_block('simulink/Math Operations/Add', [modelName, '/Final_Combine'], 'Position', [780, 350, 810, 400], 'Inputs', '+++');
-add_block('simulink/Signal Attributes/Data Type Conversion', [modelName, '/DTC_Out'], ...
-    'Position', [860, 355, 920, 395], 'OutDataTypeStr', 'fixdt(1,10,8)'); % 10-bit output
-add_block('simulink/Sinks/To Workspace', [modelName, '/Output_RAM'], ...
-    'Position', [960, 355, 1040, 395], 'VariableName', 'sim_output', 'SaveFormat', 'Timeseries');
+% Extract Polyphase Components for BPF1
+E0_bpf1 = h_bpf1(1:3:end); E1_bpf1 = h_bpf1(2:3:end); E2_bpf1 = h_bpf1(3:3:end);
 
-%% --- SIGNAL WIRING ---
+% Extract Polyphase Components for BPF2
+E0_bpf2 = h_bpf2(1:3:end); E1_bpf2 = h_bpf2(2:3:end); E2_bpf2 = h_bpf2(3:3:end);
 
-% Input to Splitter
-add_line(modelName, 'Input/1', 'DTC_In/1', 'autorouting','on');
-add_line(modelName, 'DTC_In/1', 'Delay1/1', 'autorouting','on');
-add_line(modelName, 'Delay1/1', 'Delay2/1', 'autorouting','on');
+% Prepare delayed inputs for the commutator/polyphase branches
+x_delayed_0 = x_double;
+x_delayed_1 = [0, x_double(1:end-1)];
+x_delayed_2 = [0, 0, x_double(1:end-2)];
 
-% Connect Delays to Shared Downsamplers
-add_line(modelName, 'DTC_In/1', 'DS0/1', 'autorouting','on');
-add_line(modelName, 'Delay1/1', 'DS1/1', 'autorouting','on');
-add_line(modelName, 'Delay2/1', 'DS2/1', 'autorouting','on');
+% Down-sample the inputs by 3 (saving memory/computation)
+x_ds_0 = x_delayed_0(1:3:end);
+x_ds_1 = x_delayed_1(1:3:end);
+x_ds_2 = x_delayed_2(1:3:end);
 
-% Route DS0 to all E0 filters
-add_line(modelName, 'DS0/1', 'LPF_E0/1', 'autorouting','on');
-add_line(modelName, 'DS0/1', 'BPF1_E0/1', 'autorouting','on');
-add_line(modelName, 'DS0/1', 'BPF2_E0/1', 'autorouting','on');
+% Filter and sum the branches for each respective band
+y_lpf_raw = filter(E0_lpf, 1, x_ds_0) + filter(E1_lpf, 1, x_ds_1) + filter(E2_lpf, 1, x_ds_2);
+y_bpf1_raw = filter(E0_bpf1, 1, x_ds_0) + filter(E1_bpf1, 1, x_ds_1) + filter(E2_bpf1, 1, x_ds_2);
+y_bpf2_raw = filter(E0_bpf2, 1, x_ds_0) + filter(E1_bpf2, 1, x_ds_1) + filter(E2_bpf2, 1, x_ds_2);
 
-% Route DS1 to all E1 filters
-add_line(modelName, 'DS1/1', 'LPF_E1/1', 'autorouting','on');
-add_line(modelName, 'DS1/1', 'BPF1_E1/1', 'autorouting','on');
-add_line(modelName, 'DS1/1', 'BPF2_E1/1', 'autorouting','on');
+%% 4. Amplitude Enhancement (dB Adjustments)
+% LPF enhanced by +1 dB, BPFs enhanced by -1 dB
+gain_lpf  = 10^(1/20);  
+gain_bpf1 = 10^(-1/20); 
+gain_bpf2 = 10^(-1/20); 
 
-% Route DS2 to all E2 filters
-add_line(modelName, 'DS2/1', 'LPF_E2/1', 'autorouting','on');
-add_line(modelName, 'DS2/1', 'BPF1_E2/1', 'autorouting','on');
-add_line(modelName, 'DS2/1', 'BPF2_E2/1', 'autorouting','on');
+y_lpf  = y_lpf_raw  * gain_lpf;
+y_bpf1 = y_bpf1_raw * gain_bpf1;
+y_bpf2 = y_bpf2_raw * gain_bpf2;
 
-% Sum and Gain LPF
-add_line(modelName, 'LPF_E0/1', 'Sum_LPF/1', 'autorouting','on');
-add_line(modelName, 'LPF_E1/1', 'Sum_LPF/2', 'autorouting','on');
-add_line(modelName, 'LPF_E2/1', 'Sum_LPF/3', 'autorouting','on');
-add_line(modelName, 'Sum_LPF/1', 'Gain_LPF/1', 'autorouting','on');
+%% 5. Combine Data & Final Fixed-Point Conversion
+% Combine the down-sampled, filtered, and scaled signals
+y_combined = y_lpf + y_bpf1 + y_bpf2;
 
-% Sum and Gain BPF1
-add_line(modelName, 'BPF1_E0/1', 'Sum_BPF1/1', 'autorouting','on');
-add_line(modelName, 'BPF1_E1/1', 'Sum_BPF1/2', 'autorouting','on');
-add_line(modelName, 'BPF1_E2/1', 'Sum_BPF1/3', 'autorouting','on');
-add_line(modelName, 'Sum_BPF1/1', 'Gain_BPF1/1', 'autorouting','on');
+% Convert Output to Fixed-Point: 10-bit real with 8 fractional bits (Signed)
+y_fi = fi(y_combined, 1, 10, 8);
 
-% Sum and Gain BPF2
-add_line(modelName, 'BPF2_E0/1', 'Sum_BPF2/1', 'autorouting','on');
-add_line(modelName, 'BPF2_E1/1', 'Sum_BPF2/2', 'autorouting','on');
-add_line(modelName, 'BPF2_E2/1', 'Sum_BPF2/3', 'autorouting','on');
-add_line(modelName, 'Sum_BPF2/1', 'Gain_BPF2/1', 'autorouting','on');
+%% 6. Prepare Data for SIMULINK Verification
+% Format input data so SIMULINK can ingest it via the "From Workspace" block
+sim_time = (0:(length(x_double)-1))';
+sim_input = timeseries(x_double', sim_time);
 
-% Final Combiner & Output
-add_line(modelName, 'Gain_LPF/1', 'Final_Combine/1', 'autorouting','on');
-add_line(modelName, 'Gain_BPF1/1', 'Final_Combine/2', 'autorouting','on');
-add_line(modelName, 'Gain_BPF2/1', 'Final_Combine/3', 'autorouting','on');
-add_line(modelName, 'Final_Combine/1', 'DTC_Out/1', 'autorouting','on');
-add_line(modelName, 'DTC_Out/1', 'Output_RAM/1', 'autorouting','on');
+% Save coefficients for Simulink FIR blocks
+assignin('base', 'sim_input', sim_input);
+assignin('base', 'h_lpf', h_lpf);
+assignin('base', 'h_bpf1', h_bpf1);
+assignin('base', 'h_bpf2', h_bpf2);
 
-disp('Complete 3-Filter Polyphase Simulink Model Generated Successfully!');
+disp('DSP processing complete. Filtered output generated.');
+disp(['Input Fixed-Point Type: ', x_fi.DataType]);
+disp(['Output Fixed-Point Type: ', y_fi.DataType]);
+disp('Data (sim_input) is now ready in the workspace for SIMULINK import.');
